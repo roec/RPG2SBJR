@@ -2,13 +2,14 @@
 
 import { Copy, Download, FileCode2, FolderTree, Play, Workflow } from 'lucide-react';
 import JSZip from 'jszip';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { SAMPLE_RPG } from '@/lib/sample';
 import { AgentStep, FileTreeNode, MigrationResult } from '@/types/migration';
 
 type Tab = 'pipeline' | 'tree' | 'viewer';
 
 const copyText = async (text: string) => navigator.clipboard.writeText(text);
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const AGENT_RUNTIME_STEPS = [
   { id: 1, name: 'RPG Parser', purpose: 'Parse RPG source into structural elements + sourceTrace.' },
@@ -19,6 +20,8 @@ const AGENT_RUNTIME_STEPS = [
   { id: 6, name: 'Code Assembler', purpose: 'Assemble final files map and folder tree.' }
 ];
 
+const STEP_DELAY_MS = 550;
+
 export default function HomePage() {
   const [rpgSource, setRpgSource] = useState('');
   const [tab, setTab] = useState<Tab>('pipeline');
@@ -27,6 +30,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [runtimeStep, setRuntimeStep] = useState(0);
+  const [runtimePhase, setRuntimePhase] = useState<'idle' | 'initializing' | 'running' | 'finalizing' | 'completed'>('idle');
 
   const filesMap = result?.filesMap ?? {};
   const sortedPaths = useMemo(() => Object.keys(filesMap).sort(), [filesMap]);
@@ -36,32 +40,40 @@ export default function HomePage() {
     setTimeout(() => setToast(null), 1800);
   };
 
-  useEffect(() => {
-    if (!loading) {
-      setRuntimeStep(0);
-      return;
+  const animateRuntime = async () => {
+    setRuntimePhase('initializing');
+    setRuntimeStep(0);
+    await wait(320);
+
+    setRuntimePhase('running');
+    for (let idx = 1; idx <= AGENT_RUNTIME_STEPS.length; idx += 1) {
+      setRuntimeStep(idx);
+      await wait(STEP_DELAY_MS);
     }
 
-    setTab('pipeline');
-    setRuntimeStep(1);
-
-    const timer = setInterval(() => {
-      setRuntimeStep((current) => (current >= AGENT_RUNTIME_STEPS.length ? current : current + 1));
-    }, 600);
-
-    return () => clearInterval(timer);
-  }, [loading]);
+    setRuntimePhase('finalizing');
+    await wait(420);
+    setRuntimePhase('completed');
+    await wait(280);
+  };
 
   const run = async () => {
+    if (loading) return;
+
     setLoading(true);
+    setTab('pipeline');
     setResult(null);
+
     try {
-      const res = await fetch('/api/migrate', {
+      const migrationPromise = fetch('/api/migrate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rpgSource })
       });
+
+      const [res] = await Promise.all([migrationPromise, animateRuntime()]);
       if (!res.ok) throw new Error('Unable to run migration pipeline.');
+
       const data = (await res.json()) as MigrationResult;
       setResult(data);
       const defaultFile = Object.keys(data.filesMap)[0];
@@ -71,6 +83,8 @@ export default function HomePage() {
       showToast(String(e));
     } finally {
       setLoading(false);
+      setRuntimeStep(0);
+      setRuntimePhase('idle');
     }
   };
 
@@ -103,7 +117,7 @@ export default function HomePage() {
               disabled={!rpgSource.trim() || loading}
               className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-white shadow hover:bg-indigo-500 disabled:opacity-40"
             >
-              <Play size={16} /> Run Migration
+              <Play size={16} /> {loading ? 'Running...' : 'Run Migration'}
             </button>
           </div>
         </header>
@@ -142,12 +156,12 @@ export default function HomePage() {
                   </button>
                 ))}
               </div>
-              <button disabled={!result} onClick={downloadZip} className="inline-flex items-center gap-2 rounded-lg border px-3 py-1 text-sm disabled:opacity-30">
+              <button disabled={!result || loading} onClick={downloadZip} className="inline-flex items-center gap-2 rounded-lg border px-3 py-1 text-sm disabled:opacity-30">
                 <Download size={14} /> Download Project as ZIP
               </button>
             </div>
 
-            {loading && <PipelineLoadingState runtimeStep={runtimeStep} />}
+            {loading && <PipelineLoadingState runtimeStep={runtimeStep} phase={runtimePhase} />}
             {!loading && tab === 'pipeline' && <PipelineView steps={result?.steps ?? []} onCopy={showToast} />}
             {!loading && tab === 'tree' && <TreeView nodes={result?.tree ?? []} onSelect={setSelectedFile} />}
             {!loading && tab === 'viewer' && (
@@ -236,14 +250,26 @@ function TreeNode({ node, onSelect, depth }: { node: FileTreeNode; onSelect: (pa
   );
 }
 
-function PipelineLoadingState({ runtimeStep }: { runtimeStep: number }) {
-  const progress = Math.min(100, Math.max(8, Math.round((runtimeStep / AGENT_RUNTIME_STEPS.length) * 100)));
+function PipelineLoadingState({ runtimeStep, phase }: { runtimeStep: number; phase: 'idle' | 'initializing' | 'running' | 'finalizing' | 'completed' }) {
+  const progress =
+    phase === 'initializing'
+      ? 6
+      : phase === 'finalizing'
+        ? 92
+        : phase === 'completed'
+          ? 100
+          : Math.min(88, Math.max(12, Math.round((runtimeStep / AGENT_RUNTIME_STEPS.length) * 88)));
 
   return (
     <div className="h-[620px] space-y-3 overflow-auto pr-1">
       <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
         <div className="mb-2 flex items-center justify-between text-xs font-medium text-indigo-700">
-          <span>Migration runtime in progress</span>
+          <span>
+            {phase === 'initializing' && 'Initializing migration context...'}
+            {phase === 'running' && 'Executing agent pipeline...'}
+            {phase === 'finalizing' && 'Finalizing project artifacts...'}
+            {phase === 'completed' && 'Migration completed.'}
+          </span>
           <span>{progress}%</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-indigo-100">
@@ -252,8 +278,8 @@ function PipelineLoadingState({ runtimeStep }: { runtimeStep: number }) {
       </div>
 
       {AGENT_RUNTIME_STEPS.map((step) => {
-        const isDone = step.id < runtimeStep;
-        const isRunning = step.id === runtimeStep;
+        const isDone = step.id < runtimeStep || phase === 'finalizing' || phase === 'completed';
+        const isRunning = phase === 'running' && step.id === runtimeStep;
         const status = isDone ? 'done' : isRunning ? 'running' : 'queued';
 
         return (
@@ -274,14 +300,14 @@ function PipelineLoadingState({ runtimeStep }: { runtimeStep: number }) {
             </div>
             <p className="mt-1 text-xs text-slate-600">{step.purpose}</p>
             <div className="mt-2 rounded-lg bg-white p-2 text-xs text-slate-500">
-              {isRunning ? (
+              {isRunning && (
                 <span className="inline-flex items-center gap-2">
                   <span className="h-2.5 w-2.5 animate-ping rounded-full bg-indigo-500" />
                   Generating INPUT/OUTPUT JSON with DeepSeek + RAG evidence...
                 </span>
-              ) : (
-                <span className="block h-4 w-full animate-pulse rounded bg-slate-100" />
               )}
+              {isDone && !isRunning && <span>Step completed and staged output is ready.</span>}
+              {!isDone && !isRunning && <span className="block h-4 w-full animate-pulse rounded bg-slate-100" />}
             </div>
           </div>
         );
